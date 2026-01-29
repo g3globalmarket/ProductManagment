@@ -73,6 +73,13 @@ npm run dev
   - Brand - optional
   - Price (MNT) - required, must be > 0
   - Images - required, at least 1
+- **Image Search** (if enabled):
+  - Click "+ Add Image" to open image search dialog
+  - Automatically searches using product info (title, brand, store)
+  - Can override with custom search query
+  - Select multiple images from search results
+  - Fallback: Paste URL manually
+  - Uses Google Custom Search API + Gemini for English query optimization
 - **Validation**:
   - Inline error messages
   - Summary at top if errors
@@ -135,11 +142,31 @@ All product data and edits are persisted to localStorage with key `product-impor
   product.ts       # TypeScript types
 ```
 
+## Environment Variables
+
+### Basic Setup
+- `NEXT_PUBLIC_USE_API`: Set to `true` to enable MongoDB/API mode
+- `MONGODB_URI`: MongoDB connection string (required for API mode)
+- `MONGODB_DB`: Database name (required for API mode)
+- `ALLOW_DEV_SEED`: Set to `true` to enable dev seed endpoint
+
+### Image Search (Optional)
+To enable image search functionality:
+- `IMAGE_SEARCH_ENABLED`: Set to `true` to enable image search
+- `GOOGLE_CLOUD_API_KEY`: Google Cloud API key for Custom Search
+- `CUSTOM_SEARCH_ENGINE_ID`: Custom Search Engine ID (CX)
+- `GEMINI_API_KEY`: Google AI (Gemini) API key for query optimization
+- `GEMINI_MODEL`: Gemini model name (default: `gemini-2.0-flash`)
+- `IMAGE_SEARCH_RIGHTS`: Optional rights filter (e.g., `cc_publicdomain,cc_attribute`)
+
+See `.env.example` for all available environment variables.
+
 ## Notes
 
-- **No backend required**: Everything works with fake/local data
-- **No real APIs**: No scraping, translation, or currency conversion
-- **Deterministic**: Same search inputs produce same results
+- **No backend required** (localStorage mode): Everything works with fake/local data
+- **API mode**: Requires MongoDB connection and optional image search APIs
+- **Image Search**: Uses Google Custom Search + Gemini API to find product images
+- **Deterministic**: Same search inputs produce same results (localStorage mode)
 - **Production-ready UI**: Polished with loading states, empty states, error handling
 
 ## Documentation

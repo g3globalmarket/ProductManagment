@@ -26,17 +26,22 @@ import { Package, FileText, CheckCircle, Send, RefreshCw, Eye, EyeOff, AlertTria
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useToast } from "@/hooks/use-toast"
-import { Product, Store } from "@/types/product"
+import { Product, Store, ProductStatus } from "@/types/product"
+import { getDisplayTitle, matchesLifecycleTab } from "@/lib/utils"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 
 type FlagFilter = "ALL" | "PRICE_CHANGED" | "OUT_OF_STOCK" | "HIDDEN"
+type LifecycleTab = "ALL" | ProductStatus
 
-export default function ImportDashboard() {
+function ImportDashboard() {
   const router = useRouter()
   const { toast } = useToast()
   const products = useProductStore((state) => state.products)
+  const hasHydrated = useProductStore((state) => state.hasHydrated)
   const { toggleVisibility, runSourceCheckForPushedProducts, loadProducts, isInitialized } = useProductStore()
 
   const [searchQuery, setSearchQuery] = useState("")
+  const [lifecycleTab, setLifecycleTab] = useState<LifecycleTab>("ALL")
 
   // Load products from API on mount if using API mode
   useEffect(() => {
@@ -57,15 +62,16 @@ export default function ImportDashboard() {
     return { total, drafts, ready, pushed }
   }, [products])
 
-  const pushedProducts = useMemo(() => {
-    return products.filter((p) => p.lifecycleStatus === "PUSHED")
-  }, [products])
-
+  // Filter products by lifecycle status tab first, then apply other filters
   const filteredAndSortedProducts = useMemo(() => {
-    let filtered = pushedProducts.filter((p) => {
+    // Step 1: Filter by lifecycle status tab
+    let filtered = products.filter((p) => matchesLifecycleTab(p, lifecycleTab))
+
+    // Step 2: Apply search, flag, and store filters
+    filtered = filtered.filter((p) => {
       const matchesSearch =
         searchQuery === "" ||
-        (p.title || p.nameMn || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+        getDisplayTitle(p).toLowerCase().includes(searchQuery.toLowerCase()) ||
         (p.nameOriginal || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
         p.brand?.toLowerCase().includes(searchQuery.toLowerCase())
 
@@ -104,11 +110,23 @@ export default function ImportDashboard() {
     })
 
     return filtered
-  }, [pushedProducts, searchQuery, flagFilter, storeFilter])
+  }, [products, lifecycleTab, searchQuery, flagFilter, storeFilter])
+
+  // Get products for the current tab (for stats display)
+  const currentTabProducts = useMemo(() => {
+    return products.filter((p) => matchesLifecycleTab(p, lifecycleTab))
+  }, [products, lifecycleTab])
+
+  // Get pushed products count for "Check Source Updates" button
+  const pushedProducts = useMemo(() => {
+    return products.filter((p) => p.lifecycleStatus === "PUSHED")
+  }, [products])
 
   const handleCheckSourceUpdates = async () => {
     setIsChecking(true)
     try {
+      // Source check only works on PUSHED products
+      // It operates on all PUSHED products in the database, not just the current tab
       const result = await runSourceCheckForPushedProducts()
       toast({
         title: "Source Check Complete",
@@ -125,11 +143,22 @@ export default function ImportDashboard() {
     }
   }
 
-  const handleToggleVisibility = (id: string) => {
-    toggleVisibility(id)
+  // Get section title based on active tab
+  const getSectionTitle = () => {
+    if (lifecycleTab === "ALL") return "Products"
+    return `${lifecycleTab} Products`
+  }
+
+  const handleToggleVisibility = async (id: string) => {
     const product = products.find((p) => p.id === id)
+    // Determine next visibility state BEFORE toggle
+    const nextVisibility = product?.visibility === "hidden" ? "public" : "hidden"
+    
+    await toggleVisibility(id)
+    
+    // Show toast with correct next state
     toast({
-      title: product?.visibility === "hidden" ? "Product Hidden" : "Product Unhidden",
+      title: nextVisibility === "hidden" ? "Product Hidden" : "Product is now public",
       description: `Product visibility updated`,
     })
   }
@@ -148,6 +177,21 @@ export default function ImportDashboard() {
     if (diffHours < 24) return `${diffHours}h ago`
     if (diffDays < 7) return `${diffDays}d ago`
     return date.toLocaleDateString()
+  }
+
+  // Guard rendering until store is hydrated to prevent server/client mismatch
+  // This ensures the initial HTML matches between server and client
+  if (!hasHydrated) {
+    return (
+      <div className="container mx-auto p-6">
+        <div className="flex items-center justify-center min-h-[400px]">
+          <div className="text-center">
+            <Package className="h-12 w-12 mx-auto mb-4 opacity-50 animate-pulse" />
+            <p className="text-muted-foreground">Loading...</p>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -214,32 +258,43 @@ export default function ImportDashboard() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle>Products in Database</CardTitle>
+              <CardTitle>{getSectionTitle()}</CardTitle>
               <CardDescription>
-                Manage pushed products and monitor source changes
+                {lifecycleTab === "PUSHED" 
+                  ? "Manage pushed products and monitor source changes"
+                  : lifecycleTab === "ALL"
+                  ? "View and manage all products"
+                  : `View and manage ${lifecycleTab.toLowerCase()} products`}
               </CardDescription>
             </div>
-            <Button
-              onClick={handleCheckSourceUpdates}
-              disabled={isChecking || pushedProducts.length === 0}
-              variant="outline"
-            >
-              {isChecking ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Checking...
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                  Check Source Updates
-                </>
-              )}
-            </Button>
+            <Tooltip open={lifecycleTab !== "PUSHED" ? undefined : false}>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={handleCheckSourceUpdates}
+                  disabled={isChecking || pushedProducts.length === 0 || lifecycleTab !== "PUSHED"}
+                  variant="outline"
+                >
+                  {isChecking ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Checking...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      Check Source Updates
+                    </>
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>Source check is only available for PUSHED products</p>
+              </TooltipContent>
+            </Tooltip>
           </div>
         </CardHeader>
         <CardContent>
-          {pushedProducts.length === 0 ? (
+          {products.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
               <Package className="h-12 w-12 mx-auto mb-4 opacity-50" />
               <p>No products in database yet</p>
@@ -250,126 +305,137 @@ export default function ImportDashboard() {
             </div>
           ) : (
             <>
-              <div className="flex flex-col sm:flex-row gap-4 mb-4">
-                <Input
-                  placeholder="Search by name or brand..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="max-w-sm"
-                />
-                <Select value={flagFilter} onValueChange={(value) => setFlagFilter(value as FlagFilter)}>
-                  <SelectTrigger className="w-[180px]">
-                    <SelectValue placeholder="Filter by flag" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="ALL">All Flags</SelectItem>
-                    <SelectItem value="PRICE_CHANGED">Price Changed</SelectItem>
-                    <SelectItem value="OUT_OF_STOCK">Out of Stock</SelectItem>
-                    <SelectItem value="HIDDEN">Hidden</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={storeFilter}
-                  onValueChange={(value) => setStoreFilter(value as Store | "ALL")}
-                >
-                  <SelectTrigger className="w-[180px]">
-                    <SelectValue placeholder="Filter by store" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="ALL">All Stores</SelectItem>
-                    <SelectItem value="gmarket">Gmarket</SelectItem>
-                    <SelectItem value="oliveyoung">Olive Young</SelectItem>
-                    <SelectItem value="auction">Auction</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+              <Tabs value={lifecycleTab} onValueChange={(value) => setLifecycleTab(value as LifecycleTab)} className="w-full">
+                <TabsList className="grid w-full grid-cols-5 mb-4">
+                  <TabsTrigger value="ALL">All</TabsTrigger>
+                  <TabsTrigger value="RAW">RAW</TabsTrigger>
+                  <TabsTrigger value="DRAFT">DRAFT</TabsTrigger>
+                  <TabsTrigger value="READY">READY</TabsTrigger>
+                  <TabsTrigger value="PUSHED">PUSHED</TabsTrigger>
+                </TabsList>
+                <TabsContent value={lifecycleTab} className="mt-0">
+                  <div className="flex flex-col sm:flex-row gap-4 mb-4">
+                    <Input
+                      placeholder="Search by name or brand..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="max-w-sm"
+                    />
+                    <Select value={flagFilter} onValueChange={(value) => setFlagFilter(value as FlagFilter)}>
+                      <SelectTrigger className="w-[180px]">
+                        <SelectValue placeholder="Filter by flag" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="ALL">All Flags</SelectItem>
+                        <SelectItem value="PRICE_CHANGED">Price Changed</SelectItem>
+                        <SelectItem value="OUT_OF_STOCK">Out of Stock</SelectItem>
+                        <SelectItem value="HIDDEN">Hidden</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Select
+                      value={storeFilter}
+                      onValueChange={(value) => setStoreFilter(value as Store | "ALL")}
+                    >
+                      <SelectTrigger className="w-[180px]">
+                        <SelectValue placeholder="Filter by store" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="ALL">All Stores</SelectItem>
+                        <SelectItem value="gmarket">Gmarket</SelectItem>
+                        <SelectItem value="oliveyoung">Olive Young</SelectItem>
+                        <SelectItem value="auction">Auction</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-              {filteredAndSortedProducts.length > 0 && (
-                <div className="text-sm text-muted-foreground mb-2">
-                  Showing {filteredAndSortedProducts.length} of {pushedProducts.length} products
-                  {(() => {
-                    const mostRecentCheck = filteredAndSortedProducts
-                      .map((p) => p.sourceLastCheckedAt)
-                      .filter(Boolean)
-                      .sort()
-                      .reverse()[0]
-                    if (!mostRecentCheck) return null
-                    const product = filteredAndSortedProducts.find((p) => p.sourceLastCheckedAt === mostRecentCheck)
-                    return product ? (
-                      <span className="ml-2">
-                        • Last checked: {getLastCheckedText(product)}
-                      </span>
-                    ) : null
-                  })()}
-                </div>
-              )}
+                  {filteredAndSortedProducts.length > 0 && (
+                    <div className="text-sm text-muted-foreground mb-2">
+                      Showing {filteredAndSortedProducts.length} of {currentTabProducts.length} products
+                      {lifecycleTab === "PUSHED" && (() => {
+                        const mostRecentCheck = filteredAndSortedProducts
+                          .map((p) => p.sourceLastCheckedAt)
+                          .filter(Boolean)
+                          .sort()
+                          .reverse()[0]
+                        if (!mostRecentCheck) return null
+                        const product = filteredAndSortedProducts.find((p) => p.sourceLastCheckedAt === mostRecentCheck)
+                        return product ? (
+                          <span className="ml-2">
+                            • Last checked: {getLastCheckedText(product)}
+                          </span>
+                        ) : null
+                      })()}
+                    </div>
+                  )}
 
-              <div className="rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-[60px]">Image</TableHead>
-                      <TableHead>Product</TableHead>
-                      <TableHead>Store / Category</TableHead>
-                      <TableHead>Price (MNT)</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredAndSortedProducts.length === 0 ? (
+                  <div className="rounded-md border">
+                  <Table>
+                    <TableHeader>
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                          No products match your filters
-                        </TableCell>
+                        <TableHead className="w-[60px]">Image</TableHead>
+                        <TableHead>Product</TableHead>
+                        <TableHead>Store / Category</TableHead>
+                        <TableHead>Price (MNT)</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
                       </TableRow>
-                    ) : (
-                      filteredAndSortedProducts.map((product) => (
-                        <TableRow key={product.id}>
-                          <TableCell>
-                            {(product.imagesFinal?.length ?? 0) > 0 ? (
-                              <img
-                                src={product.imagesFinal?.[0] || ''}
-                                alt={product.title || product.nameMn || product.slug || 'Product'}
-                                className="w-12 h-12 object-cover rounded"
-                              />
-                            ) : (
-                              <div className="w-12 h-12 bg-muted rounded flex items-center justify-center">
-                                <Package className="h-6 w-6 text-muted-foreground" />
-                              </div>
-                            )}
+                    </TableHeader>
+                    <TableBody>
+                      {filteredAndSortedProducts.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                            No products match your filters
                           </TableCell>
-                          <TableCell>
-                            <div>
-                              <p className="font-medium">{product.title || product.nameMn || product.nameOriginal || product.slug}</p>
-                              {product.brand && (
-                                <p className="text-sm text-muted-foreground">{product.brand}</p>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div>
-                              <p className="text-sm capitalize">{product.sourceStore}</p>
-                              <p className="text-xs text-muted-foreground">{product.category}</p>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="font-medium">
-                              {(product.priceMnt || 0).toLocaleString()} MNT
-                            </div>
-                            {product.sourcePriceChanged && product.sourceLastCheckedPriceKrw && (
-                              <div className="text-xs text-muted-foreground">
-                                Source: {product.sourceLastCheckedPriceKrw.toLocaleString()} KRW
-                              </div>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-wrap gap-1">
-                              <TooltipProvider>
-                                {product.sourceOutOfStock && (
+                        </TableRow>
+                      ) : (
+                        filteredAndSortedProducts.map((product) => (
+                            <TableRow key={product.id}>
+                              <TableCell>
+                                {(product.imagesFinal?.length ?? 0) > 0 ? (
+                                  <img
+                                    src={product.imagesFinal?.[0] || ''}
+                                    alt={getDisplayTitle(product) || 'Product'}
+                                    className="w-12 h-12 object-cover rounded"
+                                  />
+                                ) : (
+                                  <div className="w-12 h-12 bg-muted rounded flex items-center justify-center">
+                                    <Package className="h-6 w-6 text-muted-foreground" />
+                                  </div>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <div>
+                                  <p className="font-medium">{getDisplayTitle(product) || product.nameOriginal || 'Untitled'}</p>
+                                  {product.brand && (
+                                    <p className="text-sm text-muted-foreground">{product.brand}</p>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div>
+                                  <p className="text-sm capitalize">{product.sourceStore}</p>
+                                  <p className="text-xs text-muted-foreground">{product.category}</p>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div className="font-medium">
+                                  {(product.priceMnt || 0).toLocaleString()} MNT
+                                </div>
+                                {product.sourcePriceChanged && product.sourceLastCheckedPriceKrw && (
+                                  <div className="text-xs text-muted-foreground">
+                                    Source: {product.sourceLastCheckedPriceKrw.toLocaleString()} KRW
+                                  </div>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex flex-wrap gap-1">
                                   <Tooltip>
-                                    <TooltipTrigger>
-                                      <Badge variant="destructive" className="text-xs">
+                                    <TooltipTrigger asChild>
+                                      <Badge 
+                                        variant="destructive" 
+                                        className="text-xs"
+                                        style={{ display: product.sourceOutOfStock ? 'inline-flex' : 'none' }}
+                                      >
                                         <AlertTriangle className="h-3 w-3 mr-1" />
                                         Out of Stock
                                       </Badge>
@@ -378,11 +444,13 @@ export default function ImportDashboard() {
                                       <p>Product is out of stock on source site</p>
                                     </TooltipContent>
                                   </Tooltip>
-                                )}
-                                {product.sourcePriceChanged && !product.sourceOutOfStock && (
                                   <Tooltip>
-                                    <TooltipTrigger>
-                                      <Badge variant="outline" className="text-xs border-orange-500 text-orange-700">
+                                    <TooltipTrigger asChild>
+                                      <Badge 
+                                        variant="outline" 
+                                        className="text-xs border-orange-500 text-orange-700"
+                                        style={{ display: product.sourcePriceChanged && !product.sourceOutOfStock ? 'inline-flex' : 'none' }}
+                                      >
                                         <DollarSign className="h-3 w-3 mr-1" />
                                         Price Changed
                                       </Badge>
@@ -394,11 +462,13 @@ export default function ImportDashboard() {
                                       </p>
                                     </TooltipContent>
                                   </Tooltip>
-                                )}
-                                {product.visibility === "hidden" && (
                                   <Tooltip>
-                                    <TooltipTrigger>
-                                      <Badge variant="outline" className="text-xs">
+                                    <TooltipTrigger asChild>
+                                      <Badge 
+                                        variant="outline" 
+                                        className="text-xs"
+                                        style={{ display: product.visibility === "hidden" ? 'inline-flex' : 'none' }}
+                                      >
                                         <EyeOff className="h-3 w-3 mr-1" />
                                         Hidden
                                       </Badge>
@@ -407,39 +477,39 @@ export default function ImportDashboard() {
                                       <p>Product is hidden from public access</p>
                                     </TooltipContent>
                                   </Tooltip>
-                                )}
-                              </TooltipProvider>
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="flex items-center justify-end gap-2">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleToggleVisibility(product.id)}
-                                title={product.visibility === "hidden" ? "Unhide" : "Hide"}
-                              >
-                                {product.visibility === "hidden" ? (
-                                  <EyeOff className="h-4 w-4" />
-                                ) : (
-                                  <Eye className="h-4 w-4" />
-                                )}
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => router.push(`/import/new/${product.id}`)}
-                              >
-                                Open
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleToggleVisibility(product.id)}
+                                    title={product.visibility === "hidden" ? "Unhide" : "Hide"}
+                                  >
+                                    {product.visibility === "hidden" ? (
+                                      <EyeOff className="h-4 w-4" />
+                                    ) : (
+                                      <Eye className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => router.push(`/import/new/${product.id}`)}
+                                  >
+                                    Open
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </TabsContent>
+              </Tabs>
             </>
           )}
         </CardContent>
@@ -447,4 +517,15 @@ export default function ImportDashboard() {
     </div>
   )
 }
+
+// Wrap component with single TooltipProvider at top level
+function ImportDashboardWithProvider() {
+  return (
+    <TooltipProvider>
+      <ImportDashboard />
+    </TooltipProvider>
+  )
+}
+
+export default ImportDashboardWithProvider
 

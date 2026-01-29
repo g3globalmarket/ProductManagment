@@ -21,6 +21,7 @@ import Link from "next/link"
 import { Search, Loader2, AlertCircle, Save, Send } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { ProductCardSkeleton } from "@/components/product-card-skeleton"
+import { getDisplayTitle } from "@/lib/utils"
 
 export default function ImportNewPage() {
   const router = useRouter()
@@ -74,7 +75,7 @@ export default function ImportNewPage() {
   const filteredResults = currentSearchResults.filter((product) => {
     const matchesSearch =
       searchQuery === "" ||
-      (product.title || product.nameMn || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      getDisplayTitle(product).toLowerCase().includes(searchQuery.toLowerCase()) ||
       (product.nameOriginal || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
       product.brand?.toLowerCase().includes(searchQuery.toLowerCase())
 
@@ -180,8 +181,8 @@ export default function ImportNewPage() {
 
   const hasWarnings = (product: typeof currentSearchResults[0]) => {
     return (
-      !(product.title || product.nameMn) ||
-      !(product.short_description || product.descriptionMn) ||
+      !getDisplayTitle(product) ||
+      !(product.short_description || product.descriptionMn || product.detailed_description) ||
       !product.brand ||
       (product.imagesFinal?.length ?? 0) === 0
     )
@@ -376,12 +377,12 @@ export default function ImportNewPage() {
                   {(product.imagesFinal?.length ?? 0) > 0 && (
                     <img
                       src={product.imagesFinal?.[0] || ''}
-                      alt={product.title || product.nameMn || product.slug || 'Product'}
+                      alt={getDisplayTitle(product) || 'Product'}
                       className="w-full h-48 object-cover rounded-lg mb-4"
                     />
                   )}
                   <h3 className="font-semibold mb-1">
-                    {product.title || product.nameMn || product.nameOriginal || product.slug}
+                    {getDisplayTitle(product) || product.nameOriginal || 'Untitled'}
                   </h3>
                   {product.brand && (
                     <p className="text-sm text-muted-foreground mb-2">

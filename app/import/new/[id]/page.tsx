@@ -1,18 +1,20 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { useProductStore } from "@/lib/store"
 import { ProductStatus } from "@/types/product"
 import { normalizeProduct } from "@/lib/normalizeProduct"
+import { getDisplayTitle, getDisplayDescription } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
 import Link from "next/link"
-import { ArrowLeft, ArrowRight, Save, CheckCircle, Send, X, AlertCircle } from "lucide-react"
+import { ArrowLeft, ArrowRight, Save, CheckCircle, Send, X, AlertCircle, Search, Loader2, Image as ImageIcon } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -51,6 +53,12 @@ export default function ProductEditorPage() {
   const [pendingNavigation, setPendingNavigation] = useState<string | null>(null)
   const [showImageDialog, setShowImageDialog] = useState(false)
   const [newImageUrl, setNewImageUrl] = useState("")
+  const [imageSearchQuery, setImageSearchQuery] = useState("")
+  const [imageSearchResults, setImageSearchResults] = useState<string[]>([])
+  const [isSearchingImages, setIsSearchingImages] = useState(false)
+  const [selectedImageUrls, setSelectedImageUrls] = useState<Set<string>>(new Set())
+  const [showManualUrlInput, setShowManualUrlInput] = useState(false)
+  const [imageCount, setImageCount] = useState<number>(10)
 
   // Get product and compute navigation context
   const rawProduct = getProduct(productId)
@@ -63,24 +71,39 @@ export default function ProductEditorPage() {
   const hasPrevious = currentIndex > 0
   const hasNext = currentIndex < navigationList.length - 1
 
-  // Update form data when product changes
+  // Track last initialized product ID to prevent re-initialization loop
+  const lastInitializedIdRef = useRef<string | null>(null)
+
+  // Update form data when product ID changes (not product object reference)
   // Product is normalized to auto-fill Final fields from existing MongoDB fields
   useEffect(() => {
-    if (product) {
-      setFormData({
-        // Auto-fill from title if nameMn is empty (normalized)
-        nameMn: product.nameMn || "",
-        // Auto-fill from detailed_description or short_description if descriptionMn is empty (normalized)
-        descriptionMn: product.descriptionMn || "",
-        brand: product.brand || "",
-        // Use normalized priceMnt (calculated from sale_price/regular_price if needed)
-        priceMnt: product.priceMnt || 0,
-        // Use normalized imagesFinal (extracted from custom_properties.imageUrls if needed)
-        imagesFinal: [...(product.imagesFinal || [])],
-      })
-      setHasUnsavedChanges(false)
+    if (!product) {
+      lastInitializedIdRef.current = null
+      return
     }
-  }, [product])
+
+    // Only initialize if this is a different product or first load
+    // This prevents infinite loop when product object reference changes but data is same
+    if (lastInitializedIdRef.current === product.id) {
+      return
+    }
+
+    lastInitializedIdRef.current = product.id
+
+    setFormData({
+      // Auto-fill from title if nameMn is empty (normalized)
+      // This ensures DB products with title but no nameMn are editable
+      nameMn: product.nameMn || product.title || "",
+      // Auto-fill from detailed_description or short_description if descriptionMn is empty (normalized)
+      descriptionMn: product.descriptionMn || product.detailed_description || product.short_description || "",
+      brand: product.brand || "",
+      // Use normalized priceMnt (calculated from sale_price/regular_price if needed)
+      priceMnt: product.priceMnt || 0,
+      // Use normalized imagesFinal (extracted from custom_properties.imageUrls if needed)
+      imagesFinal: [...(product.imagesFinal || [])],
+    })
+    setHasUnsavedChanges(false)
+  }, [product?.id])
 
   // Handler functions - defined before useCallback
   const handleFieldChange = (field: string, value: any) => {
@@ -154,6 +177,90 @@ export default function ProductEditorPage() {
 
   const handleImageAdd = () => {
     setShowImageDialog(true)
+    setImageSearchQuery("")
+    setImageSearchResults([])
+    setSelectedImageUrls(new Set())
+    setShowManualUrlInput(false)
+    // Auto-search when dialog opens if product has info
+    // The search will use the generated query automatically
+    if (product) {
+      handleImageSearch()
+    }
+  }
+
+  const handleImageSearch = async () => {
+    if (!product) return
+
+    setIsSearchingImages(true)
+    setImageSearchResults([])
+    setSelectedImageUrls(new Set())
+
+    try {
+      const query = imageSearchQuery.trim() || undefined
+      const params = new URLSearchParams({
+        productId: product.id,
+        count: imageCount.toString(),
+      })
+      if (query) {
+        params.append('q', query)
+      }
+
+      const response = await fetch(`/api/images/suggest?${params.toString()}`)
+      
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Failed to search images')
+      }
+
+      const data = await response.json()
+      setImageSearchResults(data.urls || [])
+      
+      // Update query field with queryEnBase (clean query without negative terms)
+      if (data.queryEnBase) {
+        // Only update if field is empty (first load) or if user didn't manually edit
+        if (!imageSearchQuery.trim() || imageSearchQuery.trim() === query?.trim()) {
+          setImageSearchQuery(data.queryEnBase)
+        }
+      }
+    } catch (error: any) {
+      toast({
+        title: "Image Search Failed",
+        description: error.message || "Failed to search for images",
+        variant: "destructive",
+      })
+    } finally {
+      setIsSearchingImages(false)
+    }
+  }
+
+  const handleImageSelect = (url: string) => {
+    const newSet = new Set(selectedImageUrls)
+    if (newSet.has(url)) {
+      newSet.delete(url)
+    } else {
+      newSet.add(url)
+    }
+    setSelectedImageUrls(newSet)
+  }
+
+  const handleAddSelectedImages = () => {
+    if (selectedImageUrls.size === 0) {
+      toast({
+        title: "No Images Selected",
+        description: "Please select at least one image",
+        variant: "destructive",
+      })
+      return
+    }
+
+    const newImages = [...formData.imagesFinal, ...Array.from(selectedImageUrls)]
+    handleFieldChange("imagesFinal", newImages)
+    setSelectedImageUrls(new Set())
+    setShowImageDialog(false)
+    toast({
+      title: "Images Added",
+      description: `Added ${selectedImageUrls.size} image(s)`,
+    })
   }
 
   const handleImageAddConfirm = () => {
@@ -161,6 +268,10 @@ export default function ProductEditorPage() {
       handleFieldChange("imagesFinal", [...formData.imagesFinal, newImageUrl.trim()])
       setNewImageUrl("")
       setShowImageDialog(false)
+      toast({
+        title: "Image Added",
+        description: "Image URL added successfully",
+      })
     }
   }
 
@@ -569,38 +680,180 @@ export default function ProductEditorPage() {
       </Dialog>
 
       <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Add Image URL</DialogTitle>
+            <DialogTitle>Search and Add Images</DialogTitle>
             <DialogDescription>
-              Enter the URL for the new image
+              Search for product images online or paste a URL manually
             </DialogDescription>
           </DialogHeader>
+          
           <div className="space-y-4 py-4">
-            <Input
-              placeholder="https://example.com/image.jpg"
-              value={newImageUrl}
-              onChange={(e) => setNewImageUrl(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleImageAddConfirm()
-                }
-              }}
-            />
+            {/* Search Interface */}
+            {!showManualUrlInput ? (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Search query (optional, uses product info by default)..."
+                    value={imageSearchQuery}
+                    onChange={(e) => setImageSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        handleImageSearch()
+                      }
+                    }}
+                    className="flex-1"
+                  />
+                  <Select value={imageCount.toString()} onValueChange={(v) => setImageCount(parseInt(v, 10))}>
+                    <SelectTrigger className="w-[100px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="10">10</SelectItem>
+                      <SelectItem value="20">20</SelectItem>
+                      <SelectItem value="30">30</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    onClick={handleImageSearch}
+                    disabled={isSearchingImages || !product}
+                  >
+                    {isSearchingImages ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Searching...
+                      </>
+                    ) : (
+                      <>
+                        <Search className="mr-2 h-4 w-4" />
+                        Search
+                      </>
+                    )}
+                  </Button>
+                </div>
+
+                {/* Search Results Grid */}
+                {isSearchingImages && imageSearchResults.length === 0 && (
+                  <div className="flex items-center justify-center py-12">
+                    <div className="text-center">
+                      <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin text-muted-foreground" />
+                      <p className="text-sm text-muted-foreground">Searching for images...</p>
+                    </div>
+                  </div>
+                )}
+
+                {!isSearchingImages && imageSearchResults.length === 0 && imageSearchQuery === "" && (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <ImageIcon className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                    <p>Click "Search" to find images for this product</p>
+                  </div>
+                )}
+
+                {!isSearchingImages && imageSearchResults.length === 0 && imageSearchQuery !== "" && (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <p>No images found. Try a different search query.</p>
+                  </div>
+                )}
+
+                {imageSearchResults.length > 0 && (
+                  <>
+                    <div className="text-sm text-muted-foreground">
+                      Found {imageSearchResults.length} images. Select the ones you want to add.
+                    </div>
+                    <div className="grid grid-cols-3 gap-4 max-h-[400px] overflow-y-auto">
+                      {imageSearchResults.map((url, index) => (
+                        <div
+                          key={index}
+                          className={`relative cursor-pointer border-2 rounded-lg overflow-hidden transition-all ${
+                            selectedImageUrls.has(url)
+                              ? "border-primary ring-2 ring-primary"
+                              : "border-border hover:border-primary/50"
+                          }`}
+                          onClick={() => handleImageSelect(url)}
+                        >
+                          <img
+                            src={url}
+                            alt={`Search result ${index + 1}`}
+                            className="w-full h-32 object-cover"
+                            onError={(e) => {
+                              // Hide broken images
+                              e.currentTarget.style.display = "none"
+                            }}
+                          />
+                          {selectedImageUrls.has(url) && (
+                            <div className="absolute top-2 right-2 bg-primary text-primary-foreground rounded-full p-1">
+                              <CheckCircle className="h-4 w-4" />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                <div className="flex items-center justify-between pt-2 border-t">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowManualUrlInput(true)}
+                  >
+                    Paste URL manually instead
+                  </Button>
+                  <div className="text-sm text-muted-foreground">
+                    {selectedImageUrls.size} selected
+                  </div>
+                </div>
+              </>
+            ) : (
+              /* Manual URL Input */
+              <div className="space-y-4">
+                <Input
+                  placeholder="https://example.com/image.jpg"
+                  value={newImageUrl}
+                  onChange={(e) => setNewImageUrl(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      handleImageAddConfirm()
+                    }
+                  }}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowManualUrlInput(false)}
+                >
+                  Back to image search
+                </Button>
+              </div>
+            )}
           </div>
+
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => {
                 setNewImageUrl("")
+                setImageSearchQuery("")
+                setImageSearchResults([])
+                setSelectedImageUrls(new Set())
+                setShowManualUrlInput(false)
                 setShowImageDialog(false)
               }}
             >
               Cancel
             </Button>
-            <Button onClick={handleImageAddConfirm} disabled={!newImageUrl.trim()}>
-              Add Image
-            </Button>
+            {showManualUrlInput ? (
+              <Button onClick={handleImageAddConfirm} disabled={!newImageUrl.trim()}>
+                Add Image
+              </Button>
+            ) : (
+              <Button
+                onClick={handleAddSelectedImages}
+                disabled={selectedImageUrls.size === 0}
+              >
+                Add Selected ({selectedImageUrls.size})
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

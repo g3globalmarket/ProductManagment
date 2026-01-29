@@ -18,6 +18,7 @@ interface ProductStore {
   } | null
   isLoading: boolean
   isInitialized: boolean
+  hasHydrated: boolean
 
   // Actions
   loadProducts: () => Promise<void>
@@ -29,6 +30,7 @@ interface ProductStore {
   validateProduct: (product: Product) => ValidationResult
   toggleVisibility: (id: string) => Promise<void>
   runSourceCheckForPushedProducts: () => Promise<{ checked: number; priceChanged: number; outOfStock: number }>
+  setHasHydrated: (value: boolean) => void
 }
 
 const STORAGE_KEY = "product-import-store-v2"
@@ -64,6 +66,11 @@ export const useProductStore = create<ProductStore>()(
       searchParams: null,
       isLoading: false,
       isInitialized: false,
+      hasHydrated: false,
+
+      setHasHydrated: (value: boolean) => {
+        set({ hasHydrated: value })
+      },
 
       loadProducts: async () => {
         if (!USE_API || get().isInitialized) return
@@ -80,24 +87,47 @@ export const useProductStore = create<ProductStore>()(
 
       searchProducts: async (store: Store, category: Category, count: number) => {
         if (USE_API) {
-          // In API mode, search is still client-side fake data for now
-          // Generate fake products and save them to DB
+          // In API mode, generate fake products and save them to DB
           set({ isLoading: true })
           try {
             await new Promise((resolve) => setTimeout(resolve, 800 + Math.random() * 400))
+            
+            // Generate fake products
             const fakeProducts = generateFakeProducts(store, category, count)
             
-            // For MVP, we'll just use the fake products in state
-            // In production, these would be saved to DB via API
+            // Save to DB via import endpoint
+            const res = await fetch('/api/products/import', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ store, category, count }),
+            })
+            
+            if (!res.ok) {
+              throw new Error(`Failed to import products: ${res.statusText}`)
+            }
+            
+            const result = await res.json()
+            
+            // Reload products from DB to get the actual created products with IDs
+            const products = await apiClient.getProducts()
+            
+            // Find the newly created products (they should match the search params)
+            const newProducts = products.filter((p) => 
+              p.sourceStore === store && 
+              p.category === category &&
+              !get().products.find((existing) => existing.id === p.id)
+            )
+            
             set({
-              products: [...get().products, ...fakeProducts],
-              currentSearchResults: fakeProducts,
+              products: [...get().products, ...newProducts],
+              currentSearchResults: newProducts,
               searchParams: { store, category, count },
               isLoading: false,
             })
           } catch (error) {
             console.error('Failed to search products:', error)
             set({ isLoading: false })
+            throw error
           }
           return
         }
@@ -126,7 +156,19 @@ export const useProductStore = create<ProductStore>()(
         if (USE_API) {
           set({ isLoading: true })
           try {
-            const updated = await apiClient.updateProduct(id, changes)
+            // Sync nameMn ↔ title and descriptionMn ↔ detailed_description
+            // This ensures DB products with title but no nameMn get synced correctly
+            const syncChanges: any = { ...changes }
+            if (changes.nameMn !== undefined) {
+              // When nameMn is updated, also update title (DB prefers title)
+              syncChanges.title = changes.nameMn
+            }
+            if (changes.descriptionMn !== undefined) {
+              // When descriptionMn is updated, also update detailed_description (DB prefers detailed_description)
+              syncChanges.detailed_description = changes.descriptionMn
+            }
+            
+            const updated = await apiClient.updateProduct(id, syncChanges)
             set((state) => ({
               products: state.products.map((p) => (p.id === id ? updated : p)),
               currentSearchResults: state.currentSearchResults.map((p) =>
@@ -157,15 +199,23 @@ export const useProductStore = create<ProductStore>()(
         if (USE_API) {
           set({ isLoading: true })
           try {
+            // CRITICAL FIX: Read product BEFORE update to get pre-mutation price
+            // This ensures baseline is set from the original price, not a potentially mutated one
+            const currentProduct = get().products.find((p) => p.id === id) || 
+                                  get().currentSearchResults.find((p) => p.id === id)
+            
             const updated = await apiClient.updateProductStatus(id, lifecycleStatus)
             
             // When pushing, initialize baseline and source check fields
+            // Use pre-update priceKrw if available, otherwise use updated priceKrw
             const now = new Date().toISOString()
-            const finalUpdated = lifecycleStatus === "PUSHED" && updated.lifecycleStatus !== "PUSHED"
+            const baselinePriceKrw = currentProduct?.priceKrw ?? updated.priceKrw ?? 0
+            const finalUpdated = lifecycleStatus === "PUSHED" && 
+                                 (currentProduct?.lifecycleStatus !== "PUSHED" || !currentProduct?.sourceBaselinePriceKrw)
               ? {
                   ...updated,
-                  sourceBaselinePriceKrw: updated.priceKrw,
-                  sourceLastCheckedPriceKrw: updated.priceKrw,
+                  sourceBaselinePriceKrw: baselinePriceKrw,
+                  sourceLastCheckedPriceKrw: baselinePriceKrw,
                   sourceLastCheckedInStock: true,
                   sourceLastCheckedAt: now,
                   sourcePriceChanged: false,
@@ -195,13 +245,19 @@ export const useProductStore = create<ProductStore>()(
             products: state.products.map((p) => {
               if (p.id !== id) return p
               
+              // CRITICAL FIX: Use current priceKrw BEFORE status change for baseline
+              // This ensures baseline is from the original price, not a mutated one
+              const baselinePriceKrw = p.priceKrw ?? 0
+              
               // When pushing, initialize baseline and source check fields
-              if (lifecycleStatus === "PUSHED" && p.lifecycleStatus !== "PUSHED") {
+              // Only initialize if baseline not already present
+              if (lifecycleStatus === "PUSHED" && 
+                  (p.lifecycleStatus !== "PUSHED" || !p.sourceBaselinePriceKrw)) {
                 return {
                   ...p,
                   lifecycleStatus,
-                  sourceBaselinePriceKrw: p.priceKrw,
-                  sourceLastCheckedPriceKrw: p.priceKrw,
+                  sourceBaselinePriceKrw: baselinePriceKrw,
+                  sourceLastCheckedPriceKrw: baselinePriceKrw,
                   sourceLastCheckedInStock: true,
                   sourceLastCheckedAt: now,
                   sourcePriceChanged: false,
@@ -214,12 +270,15 @@ export const useProductStore = create<ProductStore>()(
             currentSearchResults: state.currentSearchResults.map((p) => {
               if (p.id !== id) return p
               
-              if (lifecycleStatus === "PUSHED" && p.lifecycleStatus !== "PUSHED") {
+              const baselinePriceKrw = p.priceKrw ?? 0
+              
+              if (lifecycleStatus === "PUSHED" && 
+                  (p.lifecycleStatus !== "PUSHED" || !p.sourceBaselinePriceKrw)) {
                 return {
                   ...p,
                   lifecycleStatus,
-                  sourceBaselinePriceKrw: p.priceKrw,
-                  sourceLastCheckedPriceKrw: p.priceKrw,
+                  sourceBaselinePriceKrw: baselinePriceKrw,
+                  sourceLastCheckedPriceKrw: baselinePriceKrw,
                   sourceLastCheckedInStock: true,
                   sourceLastCheckedAt: now,
                   sourcePriceChanged: false,
@@ -395,6 +454,15 @@ export const useProductStore = create<ProductStore>()(
     {
       name: STORAGE_KEY,
       version: 2,
+      // Skip automatic hydration to prevent server/client mismatch
+      skipHydration: true,
+      // Only persist stable fields that should survive page reloads
+      // Do NOT persist ephemeral UI state like isLoading, isInitialized, currentSearchResults
+      partialize: (state) => ({
+        products: state.products,
+        searchParams: state.searchParams,
+        // hasHydrated is never persisted (always starts false)
+      }),
       migrate: (persistedState: any, version: number) => {
         try {
           if (version < 2) {

@@ -90,10 +90,30 @@ export class ApiClient {
     category: string,
     count: number
   ): Promise<Product[]> {
-    // For now, search is still client-side (fake data)
-    // In production, this would call a scraper API
-    // For MVP, we'll generate fake data and then save to DB
-    throw new Error('Search products not yet implemented via API')
+    // Generate fake products and import them via API
+    const res = await fetch(`${API_BASE}/products/import`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ store, category, count }),
+    })
+    
+    if (!res.ok) {
+      throw new Error(`Failed to search/import products: ${res.statusText}`)
+    }
+    
+    const result = await res.json()
+    
+    // Return all products (client will filter by store/category)
+    // Or return the created product IDs and fetch them
+    const products = await this.getProducts({
+      store,
+    })
+    
+    // Filter to only products matching the search (newly created)
+    // This is a bit of a hack - in production, the import endpoint would return the created products
+    return products.filter((p) => p.category === category)
   }
 
   async toggleVisibility(id: string): Promise<Product> {
